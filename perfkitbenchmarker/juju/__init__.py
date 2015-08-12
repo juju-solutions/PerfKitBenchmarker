@@ -21,11 +21,11 @@ def juju():
 
     # ["./pkb.py", "--cloud=amazon", "--workload=foo.yaml", "--benchmarks=cassandra-stress:stress", "--machine_type=cassandra-stress:t1.micro", "--zone=us-east-1b"]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cloud", help="display a square of a given number")
-    parser.add_argument("--workload", help="display a square of a given number")
-    parser.add_argument("--benchmarks", help="display a square of a given number")
-    parser.add_argument("--machine_type", help="display a square of a given number")
-    parser.add_argument("--zone", help="display a square of a given number")
+    parser.add_argument("--cloud", help="The juju environment to use")
+    parser.add_argument("--workload", help="A bundle file defining the workload to deploy")
+    parser.add_argument("--benchmarks", help="The benchmark to run, i.e., mycharm:myaction")
+    parser.add_argument("--machine_type", help="The machine_type to run, if different than the bundle, specified by charm, i.e., mycharm:t1-micro")
+    parser.add_argument("--zone", help="The zone to deploy to")
 
     args = parser.parse_args()
     # sys.stdout.write("cloud=%s\nworkload=%s\nbenchmarks=%s\nmachine_type=%s\nzone=%s\n" %(
