@@ -471,6 +471,10 @@ def Main(argv=sys.argv):
   try:
     argv = FLAGS(argv)  # parse flags
   except flags.FlagsError as e:
+    import juju
+    if juju.juju() == 0:
+        sys.exit(0)
+
     logging.error(
         '%s\nUsage: %s ARGS\n%s', e, sys.argv[0], FLAGS)
     sys.exit(1)
