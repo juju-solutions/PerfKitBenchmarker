@@ -22,4 +22,5 @@ setup(
     scripts=['pkb.py'],
     install_requires=['python-gflags==2.0',
                       'jinja2>=2.7',
+                      'juju-deployer>=0.5.1',
                       'setuptools'])
