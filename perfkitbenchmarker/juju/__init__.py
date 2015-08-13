@@ -1,124 +1,182 @@
 # This is a proof-of-concept module to integrate juju into perfkitbenchmarker
 
-from perfkitbenchmarker import flags
-
-import argparse
+import os
 import sys
-import subprocess
-import shlex
 import yaml
-import os.path
+import argparse
+import deployer
+import logging
+import jujuclient
+import subprocess
+
+from perfkitbenchmarker import flags
 
 
 # Juju-centric FLAGS
 flags.DEFINE_string('workload', '',
                     'Specify a bundle.yaml that represents the workload to run')
 
-def juju():
-    """
-    This is our main entry point, called when pkb.py fails to parse via gflags
-    """
 
-    # ["./pkb.py", "--cloud=amazon", "--workload=foo.yaml", "--benchmarks=cassandra-stress:stress", "--machine_type=cassandra-stress:t1.micro", "--zone=us-east-1b"]
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cloud", help="The juju environment to use")
-    parser.add_argument("--workload", help="A bundle file defining the workload to deploy")
-    parser.add_argument("--benchmarks", help="The benchmark to run, i.e., mycharm:myaction")
-    parser.add_argument("--machine_type", help="The machine_type to run, if different than the bundle, specified by charm, i.e., mycharm:t1-micro")
-    parser.add_argument("--zone", help="The zone to deploy to")
+class DeploymentError(Exception):
+  pass
 
-    args = parser.parse_args()
-    # sys.stdout.write("cloud=%s\nworkload=%s\nbenchmarks=%s\nmachine_type=%s\nzone=%s\n" %(
-    # args.cloud, args.workload, args.benchmarks, args.machine_type, args.zone))
 
-    # Assumptions: required tools installed (juju-quickstart, juju) and a configured environments.yaml
+class BenchmarkError(Exception):
+  pass
 
-    # Verify juju is installed
-    # TODO: Verify version is at least 1.24+ for actions
-    if juju_version():
 
-        # Verify the cloud name exists in environments.yaml
-        environments = get_juju_environments()
+class Juju(jujuclient.Environment):
+  @classmethod
+  def bootstrap(cls, env):
+    pass
 
-        # if we decide to format the cloud parameter as cloud=juju:amazon, then this should work:
-        # cloud = args.cloud[5:]
+  #@classmethod
+  #def installed(cls):
+  #  try:
+  #    cls()
+  #    cls.cmd(['is'])
+  #  except OSError:
+  #    return False
 
-        if args.cloud in environments:
-            # Bootstrap, bootstrap?
-            if not is_bootstrapped(cloud=args.cloud):
-                bootstrap(cloud=args.cloud)
+  #  return True
 
-            # TODO: Deploying local bundles needs JUJU_REPOSITORY set
-            # juju-quickstart -n bundle-name bundle.yaml || juju deployer -c bundle:mediawiki-single/7
-            # TODO: figure out how to overwrite machine_type
-            cmd = "juju-deployer -c %s -e %s" % (os.path.expanduser(args.workload), args.cloud)
-            run_command(cmd)
+  def deployer(self, bundle):
+    try:
+      out = self.cmd(['deployer', '-c', os.path.expanduser(bundle)])
+    except IOError as e:
+      logging.exception('Bundle deployment failed')
+      raise DeploymentError()
+    except OSError:
+      logging.exception('Deployer not installed')
+      raise
 
-            if args.benchmarks:
-                # juju action run benchmarks (i.e., cassandra-stress:stress would run juju action run cassandra-stress/0 stress)
-                unit = args.benchmarks[:args.benchmarks.index(':')]
-                action = args.benchmarks[args.benchmarks.index(':')+1:]
-                cmd = "juju action do %s/0 %s" % (unit, action)
-                output = run_command(cmd)
-                print output
-                # parse for UUID
-                # Action queued with id: 765ef202-9585-4c03-8be9-de45a2155d50
-                ACTION_UUID = output[output.index(':')+2:]
+    return
 
-                # juju action fetch --wait 0 ACTION_UUID
-                cmd = 'juju action fetch --wait 0 %s' % ACTION_UUID
-                output = run_command(cmd)
+  def is_action(self, service, action):
+    search = self.actions.service_actions(service)
+    action_specs = search['results'][0].get('actions', None)
 
-                # dump `juju action fetch` output to stdout
-                sys.stdout.write(output)
+    if not action_specs:
+      return False
 
-            return 0
+    return action in action_specs['ActionSpecs'].keys()
 
+
+  def action_do(self, unit, action, parameters=None):
+    out = self.actions.enqueue_units(unit, action, parameters)
+    results = out.get('results')[0] # We're only doing one unit at a time
+
+    if 'error' in results:
+      raise BenchmarkError('Failed to run benchmark: %s' %
+                           results['error']['Message'])
+
+    return results['action']['tag']
+
+  def action_info(self, tag):
+    return self.action.info([{'Tag': tag}])['results'][0]
+
+  def action_wait(self, uuid):
+    # Use the allwatcher API?
+    data = {}
+    while True: # Permission to kill me for doing this
+      result = self.action_info(uuid)
+      if result['status'] in ('failed', 'completed', 'cancelled'):
+        data['started'] = result['started']
+        data['completed'] = result['completed']
+        data['output'] = result.get('output', None)
+        break
+
+    return data
+
+  def benchmark(self, service, action, parameters=None):
+    if service not in self.status()['Services']:
+      raise DeploymentError('%s is not actually deployed' % service)
+
+    # Get the first unit FOR NOW, work on multiples
+    unit = self.units(service)[0]
+    if not self.is_action(service, action):
+      raise BenchmarkError('%s is not a valid benchmark for %s' % (action,
+                                                                   service))
+    action_tag = self.action_do(unit, action)
+    return self.action_wait(action_tag)
+
+  def units(self, service=None):
+    if service:
+      return [u for u in self.status()['Services'][service]['Units'].keys()]
+
+    units = []
+    for service in self.services():
+      units = units + self.units(service)
+
+    return units
+
+  def services(self):
+    return [s for s in self.status()['Services'].keys()]
+
+  def cmd(self, args, env=None):
+    if not env:
+      env = {}
+
+    # Always override this
+    env['JUJU_ENV'] = self.name
+    cmd = ['juju'] + args
+    logging.debug('Running: %s', ' '.join(cmd))
+
+    try:
+      p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
+    except OSError as e:
+      if e.errno != errno.ENOENT:
+        raise
+      raise OSError("juju not found, do you have Juju installed?")
+    out, err = p.communicate()
+    if p.returncode:
+      raise IOError("juju command failed {!r}:\n"
+                    "{}".format(args, err.decode('utf-8', 'replace')))
+    return out.decode("utf-8", "replace") if out else None
+
+
+def BuildBundle(bundle, overrides=None):
+  if 'services' not in bundle:
+    raise Exception('Not a valid bundle')
+
+  service_list = bundle['services'].keys()
+  for service in service_list:
+    if '_GLOBAL' in overrides:
+      bundle['services'][service]['constraints'] = overrides['_GLOBAL']
+
+    if service in overrides:
+      bundle['services'][service]['constraints'] = overrides[service]
+
+  return bundle
+
+
+def Main(argv=sys.argv):
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--cloud", help="The juju environment to use")
+  parser.add_argument("--workload", help="A bundle file defining the workload to deploy")
+  parser.add_argument("--benchmarks", help="The benchmark to run, i.e., mycharm:myaction")
+  parser.add_argument("--machine_type", help="The machine_type to run, if different than the bundle, specified by charm, i.e., mycharm:t1-micro")
+  parser.add_argument("--zone", help="The zone to deploy to")
+
+  args = parser.parse_args(argv)
+
+  try:
+    juju = Juju.connect(args.cloud)
+  except jujuclient.EnvironmentNotBootstrapped as e:
+    logging.error('%s is not bootstrapped or defined', args.cloud)
     return 1
 
+  if not args.benchmarks:
+    logging.error('No benchmark defined')
+    return 1
 
-def is_bootstrapped(cloud=None):
-    cmd = 'juju status'
-    if cloud:
-        cmd += " -e %s" % cloud
-    try:
-        output = run_command(cmd)
-    except subprocess.CalledProcessError:
-        return False
-    return True
+  juju.deployer(args.workload)
+  service, action = args.benchmark.split(':')
+  results = juju.benchmark(service, action)
 
-def bootstrap(cloud=None):
-    cmd = 'juju bootstrap'
-    if cloud:
-        cmd += " -e %s" % cloud
-    output = run_command(cmd)
-    return output
-
-
-def run_command(cmd):
-    return subprocess.check_output(shlex.split(cmd))
-
-
-def get_juju_environments(env=os.path.expanduser('~/.juju/environments.yaml')):
-    environments = []
-
-    if os.path.exists(env):
-        f = open(env, 'r')
-        raw = f.read()
-        f.close()
-
-        data = yaml.load(raw)
-        for name in data['environments']:
-            environments.append(name.strip())
-
-    return environments
-
-
-def juju_version():
-
-    try:
-        output = run_command('juju version')
-        return output.strip()
-    except:
-        pass
-    return None
+  sys.stdout.write(yaml.dump(results, default_flow_style=False))
+  return 1 if results['status'] != 'completed' else 0
+  #if not Juju.installed():
+  #  logging.error('Juju 1.24.4 or greater needs to be installed')
+  #  return 1

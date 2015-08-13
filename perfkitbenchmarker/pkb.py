@@ -471,8 +471,9 @@ def Main(argv=sys.argv):
   try:
     argv = FLAGS(argv)  # parse flags
   except flags.FlagsError as e:
-    import juju
-    if juju.juju() == 0:
+    # Beef this up a little more to handle exceptions
+    from perfkitbenchmarker import juju
+    if juju.Main(argv) == 0:
         sys.exit(0)
 
     logging.error(
