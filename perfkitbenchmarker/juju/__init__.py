@@ -73,7 +73,7 @@ class Juju(jujuclient.Environment):
     return results['action']['tag']
 
   def action_info(self, tag):
-    return self.action.info([{'Tag': tag}])['results'][0]
+    return self.actions.info([{'Tag': tag}])['results'][0]
 
   def action_wait(self, uuid):
     # Use the allwatcher API?
@@ -117,13 +117,18 @@ class Juju(jujuclient.Environment):
     if not env:
       env = {}
 
+    popen_env = os.environ.copy()
     # Always override this
     env['JUJU_ENV'] = self.name
+    env['JUJU_HOME'] = env.get('JUJU_HOME', os.path.expanduser('~/.juju'))
+
+    popen_env.update(env)
+
     cmd = ['juju'] + args
     logging.debug('Running: %s', ' '.join(cmd))
 
     try:
-      p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+      p = subprocess.Popen(cmd, env=popen_env, stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE)
     except OSError as e:
       if e.errno != errno.ENOENT:
@@ -159,7 +164,7 @@ def Main(argv=sys.argv):
   parser.add_argument("--machine_type", help="The machine_type to run, if different than the bundle, specified by charm, i.e., mycharm:t1-micro")
   parser.add_argument("--zone", help="The zone to deploy to")
 
-  args = parser.parse_args(argv)
+  args = parser.parse_args(argv[1:])
 
   try:
     juju = Juju.connect(args.cloud)
@@ -172,7 +177,7 @@ def Main(argv=sys.argv):
     return 1
 
   juju.deployer(args.workload)
-  service, action = args.benchmark.split(':')
+  service, action = args.benchmarks.split(':')
   results = juju.benchmark(service, action)
 
   sys.stdout.write(yaml.dump(results, default_flow_style=False))
